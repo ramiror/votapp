@@ -1,0 +1,16 @@
+{
+  "name": "votapp",
+  "version": "0.1.0",
+  "description": "Bot de votaciones para grupos de WhatsApp",
+  "main": "src/bot.js",
+  "scripts": {
+    "start": "node --no-warnings src/bot.js",
+    "test": "node --no-warnings --test test/*.test.js"
+  },
+  "engines": { "node": ">=22.13" },
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.7.24",
+    "pino": "^9.0.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
