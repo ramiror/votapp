@@ -1,30 +1,26 @@
 # votapp
-Bot de votaciones para grupos de WhatsApp. Se agrega a un grupo un número dedicado (vinculado vía QR) y la gente vota con comandos.
+Votaciones web para un grupo de WhatsApp. Se comparte un solo link en el grupo y todo lo demás pasa en la web.
 
-## Comandos
-| Comando | Qué hace |
-|---|---|
-| `!proponer Pregunta \| Op 1 \| Op 2 ...` | Crea un tema (sin opciones = Sí/No, máx. 10) |
-| `!temas` | Lista temas abiertos del grupo |
-| `!votar <tema> <opción>` | Vota (podés cambiar tu voto, no duplicarlo) |
-| `!resultados <tema>` | Conteo y porcentajes |
-| `!quien <tema>` | Quién votó qué |
-| `!cerrar <tema>` | Cierra el tema (autor o admin del grupo) |
-| `!ayuda` | Ayuda |
+## Cómo funciona
+- Un admin carga la lista de miembros (nombres).
+- Cada uno entra, elige su nombre y pone un PIN de 4 a 8 dígitos. **El primero que entra con un nombre le fija el PIN.** Si alguien se te adelantó, un admin resetea el PIN.
+- Se pueden proponer temas (pregunta + opciones; sin opciones = Sí/No), votar, cambiar el voto, ver resultados y quién votó qué.
+- Cierra un tema quien lo propuso o un admin.
 
-## Anti-fraude
-- Identidad = JID del participante que manda WhatsApp (autenticado por WA, no falseable desde el chat).
-- `votes` tiene PK `(topic_id, voter)`: un voto vigente por persona por tema, garantizado por la DB.
-- `vote_log` es append-only: registra cada intento (`new`, `changed`, `duplicate`).
-- Los temas están aislados por grupo.
+## Anti-trampa (básico, a propósito)
+- `votes` tiene PK `(topic_id, member_id)`: un voto vigente por persona por tema, garantizado por la DB.
+- `vote_log` append-only registra cada intento (`new`, `changed`, `duplicate`) con IP.
+- Solo votan miembros cargados por un admin. 5 PIN incorrectos bloquean el nombre por 15 min.
+- PIN hasheado con scrypt, sesión en cookie HttpOnly + SameSite=Lax, chequeo de Origin en POST, HTML escapado.
 
 ## Correr
-Requiere Node >= 22.13 (usa `node:sqlite`, sin deps nativas).
+Node >= 22.13, sin dependencias.
 ```sh
-npm install
-npm start          # escaneá el QR con el WhatsApp del número bot (Dispositivos vinculados)
+npm run cli -- add "Tu Nombre" --admin     # primer admin
+npm run cli -- import miembros.txt         # un nombre por línea (o cargalos desde /admin)
+npm start                                  # http://localhost:3000
 npm test
 ```
-Variables: `DB_PATH` (default `votapp.db`), `AUTH_DIR` (default `auth`), `GROUPS` (JIDs de grupo permitidos, separados por coma; vacío = todos).
+Variables: `PORT` (3000), `DB_PATH` (`votapp.db`), `COOKIE_SECURE=1` si servís por HTTPS (recomendado).
 
-> Baileys usa el protocolo de WhatsApp Web (no oficial). Usá un número dedicado: WhatsApp puede banearlo.
+CLI: `add "Nombre" [--admin] | import archivo | list | reset "Nombre" | admin "Nombre"`.
