@@ -5,13 +5,30 @@ function openDb(path = process.env.DB_PATH || 'votapp.db') {
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS members (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      name         TEXT NOT NULL UNIQUE COLLATE NOCASE,
-      pin_hash     TEXT,                    -- NULL = todavía nadie reclamó este nombre
-      is_admin     INTEGER NOT NULL DEFAULT 0,
-      failed       INTEGER NOT NULL DEFAULT 0,
-      locked_until INTEGER NOT NULL DEFAULT 0
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      handle     TEXT NOT NULL UNIQUE,          -- user.id de WebAuthn (opaco)
+      is_admin   INTEGER NOT NULL DEFAULT 0,
+      status     TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'active'
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- Passkeys: solo guardamos la clave pública de cada dispositivo.
+    CREATE TABLE IF NOT EXISTS credentials (
+      id         TEXT PRIMARY KEY,               -- credential ID (base64url)
+      member_id  INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      public_key BLOB NOT NULL,
+      counter    INTEGER NOT NULL DEFAULT 0,
+      transports TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used  TEXT
+    );
+    -- Links de un solo uso para sumar un dispositivo o recuperar la cuenta.
+    CREATE TABLE IF NOT EXISTS link_tokens (
+      token      TEXT PRIMARY KEY,
+      member_id  INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      expires_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
       token      TEXT PRIMARY KEY,
@@ -46,7 +63,7 @@ function openDb(path = process.env.DB_PATH || 'votapp.db') {
       topic_id   INTEGER NOT NULL,
       member_id  INTEGER NOT NULL,
       option_idx INTEGER NOT NULL,
-      result     TEXT NOT NULL,             -- 'new' | 'changed' | 'duplicate'
+      result     TEXT NOT NULL,                -- 'new' | 'changed' | 'duplicate'
       ip         TEXT,
       at         TEXT NOT NULL DEFAULT (datetime('now'))
     );

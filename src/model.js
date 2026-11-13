@@ -2,20 +2,10 @@
 const crypto = require('node:crypto');
 
 const MAX_OPTIONS = 10;
-const MAX_FAILS = 5;
-const LOCK_MS = 15 * 60_000;
 
 class UserError extends Error {}
 
-function hashPin(pin) {
-  const salt = crypto.randomBytes(16);
-  return salt.toString('hex') + ':' + crypto.scryptSync(pin, salt, 32).toString('hex');
-}
-function checkPin(pin, stored) {
-  const [salt, hash] = stored.split(':');
-  const got = crypto.scryptSync(pin, Buffer.from(salt, 'hex'), 32);
-  return crypto.timingSafeEqual(got, Buffer.from(hash, 'hex'));
-}
+const rnd = (n) => crypto.randomBytes(n).toString('base64url');
 
 function createModel(db) {
   const q = (sql) => db.prepare(sql);
@@ -26,51 +16,87 @@ function createModel(db) {
   };
 
   const m = {
-    // --- miembros ---
-    addMember(name, isAdmin = false) {
-      name = String(name || '').trim();
-      if (!name || name.length > 60) throw new UserError('Nombre inválido.');
-      try {
-        return Number(q('INSERT INTO members (name, is_admin) VALUES (?, ?)').run(name, isAdmin ? 1 : 0).lastInsertRowid);
-      } catch (e) {
-        if (/UNIQUE/.test(e.message)) throw new UserError(`"${name}" ya existe.`);
-        throw e;
-      }
+    // --- config ---
+    setting: (k) => q('SELECT value FROM settings WHERE key = ?').get(k)?.value,
+    setSetting: (k, v) => q('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(k, v),
+    invite() {
+      let v = m.setting('invite');
+      if (!v) m.setSetting('invite', (v = rnd(12)));
+      return v;
     },
-    members: () => q('SELECT id, name, is_admin, pin_hash IS NOT NULL AS claimed FROM members ORDER BY name').all(),
-    member: (id) => q('SELECT id, name, is_admin FROM members WHERE id = ?').get(id),
-    resetPin: (id) => tx(() => {
-      q('UPDATE members SET pin_hash = NULL, failed = 0, locked_until = 0 WHERE id = ?').run(id);
-      q('DELETE FROM sessions WHERE member_id = ?').run(id);
-    }),
+    rotateInvite: () => { m.setSetting('invite', rnd(12)); return m.setting('invite'); },
+
+    // --- miembros ---
+    checkName(name) {
+      name = String(name || '').trim().replace(/\s+/g, ' ');
+      if (!name || name.length > 40) throw new UserError('Poné un nombre (máx. 40 caracteres).');
+      if (q('SELECT 1 FROM members WHERE name = ?').get(name)) throw new UserError(`Ya hay alguien registrado como "${name}". Usá otro nombre.`);
+      return name;
+    },
+    /** Alta de miembro con su primera passkey. El primero del sistema queda admin y activo. */
+    register(name, handle, cred) {
+      return tx(() => {
+        name = m.checkName(name);
+        const first = !q('SELECT 1 FROM members LIMIT 1').get();
+        const id = Number(q('INSERT INTO members (name, handle, is_admin, status) VALUES (?, ?, ?, ?)')
+          .run(name, handle, first ? 1 : 0, first ? 'active' : 'pending').lastInsertRowid);
+        m.addCredential(id, cred);
+        return id;
+      });
+    },
+    members: () => q(`
+      SELECT m.id, m.name, m.is_admin, m.status, COUNT(c.id) AS devices
+      FROM members m LEFT JOIN credentials c ON c.member_id = m.id GROUP BY m.id ORDER BY m.status DESC, m.name`).all(),
+    member: (id) => q('SELECT id, name, handle, is_admin, status FROM members WHERE id = ?').get(id),
+    approve: (id) => q("UPDATE members SET status = 'active' WHERE id = ?").run(id),
+    reject(id) {
+      const r = q("DELETE FROM members WHERE id = ? AND status = 'pending'").run(id);
+      if (!r.changes) throw new UserError('Solo se pueden rechazar registros pendientes.');
+    },
     setAdmin: (id, on) => q('UPDATE members SET is_admin = ? WHERE id = ?').run(on ? 1 : 0, id),
 
-    // --- login: el primero que entra con un nombre le pone el PIN ---
-    login(memberId, pin, now = Date.now()) {
-      if (!/^\d{4,8}$/.test(pin || '')) throw new UserError('El PIN tiene que ser de 4 a 8 dígitos.');
-      const row = q('SELECT * FROM members WHERE id = ?').get(memberId);
-      if (!row) throw new UserError('Elegí tu nombre.');
-      if (row.locked_until > now) throw new UserError('Demasiados intentos. Probá en unos minutos.');
-      if (!row.pin_hash) {
-        q('UPDATE members SET pin_hash = ? WHERE id = ? AND pin_hash IS NULL').run(hashPin(pin), memberId);
-        return { claimed: true };
-      }
-      if (!checkPin(pin, row.pin_hash)) {
-        const failed = row.failed + 1;
-        q('UPDATE members SET failed = ?, locked_until = ? WHERE id = ?')
-          .run(failed >= MAX_FAILS ? 0 : failed, failed >= MAX_FAILS ? now + LOCK_MS : 0, memberId);
-        throw new UserError('PIN incorrecto.');
-      }
-      q('UPDATE members SET failed = 0 WHERE id = ?').run(memberId);
-      return { claimed: false };
+    // --- passkeys ---
+    addCredential(memberId, c) {
+      q('INSERT INTO credentials (id, member_id, public_key, counter, transports) VALUES (?, ?, ?, ?, ?)')
+        .run(c.id, memberId, c.publicKey, c.counter || 0, JSON.stringify(c.transports || []));
     },
+    credential(id) {
+      const r = q('SELECT * FROM credentials WHERE id = ?').get(String(id || ''));
+      return r && { ...r, publicKey: new Uint8Array(r.public_key), transports: JSON.parse(r.transports || '[]') };
+    },
+    credentialIds: (memberId) => q('SELECT id, transports FROM credentials WHERE member_id = ?').all(memberId)
+      .map((r) => ({ id: r.id, transports: JSON.parse(r.transports || '[]') })),
+    touchCredential: (id, counter) => q("UPDATE credentials SET counter = ?, last_used = datetime('now') WHERE id = ?").run(counter, id),
+
+    // --- links de un uso (sumar dispositivo / recuperar) ---
+    createLink(memberId, ttlMs = 30 * 60_000, now = Date.now()) {
+      const t = rnd(24);
+      q('INSERT INTO link_tokens (token, member_id, expires_at) VALUES (?, ?, ?)').run(t, memberId, now + ttlMs);
+      return t;
+    },
+    linkMember(token, now = Date.now()) {
+      q('DELETE FROM link_tokens WHERE expires_at < ?').run(now);
+      const r = q('SELECT member_id FROM link_tokens WHERE token = ?').get(String(token || ''));
+      return r && m.member(r.member_id);
+    },
+    useLink(token, cred) {
+      return tx(() => {
+        const mem = m.linkMember(token);
+        if (!mem) throw new UserError('El link venció o ya se usó. Pedí otro.');
+        q('DELETE FROM link_tokens WHERE token = ?').run(token);
+        m.addCredential(mem.id, cred);
+        return mem.id;
+      });
+    },
+
+    // --- sesiones ---
     createSession(memberId) {
-      const token = crypto.randomBytes(32).toString('base64url');
+      const token = rnd(32);
       q('INSERT INTO sessions (token, member_id) VALUES (?, ?)').run(token, memberId);
       return token;
     },
     sessionMember: (token) => token
-      ? q('SELECT m.id, m.name, m.is_admin FROM sessions s JOIN members m ON m.id = s.member_id WHERE s.token = ?').get(token)
+      ? q('SELECT m.id, m.name, m.is_admin, m.status FROM sessions s JOIN members m ON m.id = s.member_id WHERE s.token = ?').get(token)
       : undefined,
     logout: (token) => q('DELETE FROM sessions WHERE token = ?').run(token),
 

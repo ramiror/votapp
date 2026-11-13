@@ -4,26 +4,26 @@ const { openDb } = require('../src/db');
 const { createModel } = require('../src/model');
 const { createServer } = require('../src/server');
 
-test('flujo HTTP completo', async () => {
+test('HTTP: sin sesión, invitación y API', async () => {
   const model = createModel(openDb(':memory:'));
-  const ana = model.addMember('Ana');
-  const srv = createServer(model).listen(0);
+  const srv = createServer(model, { origin: 'http://localhost' }).listen(0);
   const base = `http://localhost:${srv.address().port}`;
-  const post = (p, body, cookie) => fetch(base + p, { method: 'POST', redirect: 'manual',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', ...(cookie && { cookie }) }, body: new URLSearchParams(body) });
+  const api = (p, body) => fetch(base + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   try {
-    assert.match(await (await fetch(base)).text(), /Ana \(primera vez\)/);
-    const r = await post('/login', { member: ana, pin: '1234' });
-    assert.equal(r.status, 303);
-    const cookie = r.headers.get('set-cookie').split(';')[0];
-    const p = await post('/topics', { title: '¿<b>Asado</b>?', options: 'Sábado\nDomingo' }, cookie);
-    assert.equal(p.headers.get('location'), '/t/1?m=proposed');
-    await post('/t/1/vote', { option: '2' }, cookie);
-    const html = await (await fetch(base + '/t/1', { headers: { cookie } })).text();
-    assert.match(html, /&lt;b&gt;Asado/);
-    assert.match(html, /<td>Ana<\/td><td>Domingo/);
-    assert.equal((await fetch(base + '/admin', { headers: { cookie } })).status, 404);
-    const bad = await fetch(base + '/topics', { method: 'POST', redirect: 'manual', headers: { cookie, origin: 'http://evil.com' }, body: 'title=x' });
-    assert.equal(bad.status, 403);
+    assert.match(await (await fetch(base)).text(), /Entrar con passkey/);
+    assert.match(await (await fetch(base + '/registro?i=trucho')).text(), /Link vencido/);
+    assert.match(await (await fetch(base + '/registro?i=' + model.invite())).text(), /Crear passkey/);
+    const bad = await api('/api/register/options', { name: 'X', invite: 'trucho' });
+    assert.equal(bad.status, 400);
+    const ok = await api('/api/register/options', { name: 'X', invite: model.invite() });
+    assert.equal(ok.status, 200);
+    const o = await ok.json();
+    assert.equal(o.rp.id, 'localhost');
+    assert.equal(o.authenticatorSelection.residentKey, 'required');
+    assert.match(ok.headers.get('set-cookie'), /votapp_flow=/);
+    const v = await api('/api/login/verify', { id: 'x' });
+    assert.equal(v.status, 400);
+    const csrf = await fetch(base + '/topics', { method: 'POST', redirect: 'manual', headers: { origin: 'http://evil.com' }, body: 'title=x' });
+    assert.equal(csrf.status, 403);
   } finally { srv.close(); }
 });

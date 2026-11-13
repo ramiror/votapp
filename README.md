@@ -1,26 +1,28 @@
 # votapp
-Votaciones web para un grupo de WhatsApp. Se comparte un solo link en el grupo y todo lo demás pasa en la web.
+Votaciones web para un grupo de WhatsApp. Al grupo va un solo link de invitación; todo lo demás pasa en la web.
 
-## Cómo funciona
-- Un admin carga la lista de miembros (nombres).
-- Cada uno entra, elige su nombre y pone un PIN de 4 a 8 dígitos. **El primero que entra con un nombre le fija el PIN.** Si alguien se te adelantó, un admin resetea el PIN.
-- Se pueden proponer temas (pregunta + opciones; sin opciones = Sí/No), votar, cambiar el voto, ver resultados y quién votó qué.
-- Cierra un tema quien lo propuso o un admin.
+## Identificación: passkeys (WebAuthn)
+- Cada uno entra al link de invitación, pone su nombre y crea una **passkey**: el dispositivo genera un par de claves y el servidor guarda solo la **pública**. Se desbloquea con huella, cara o PIN del dispositivo.
+- **El primero que se registra queda admin.** Los siguientes quedan pendientes hasta que un admin los aprueba (frena las cuentas truchas).
+- Login con un botón, sin elegir usuario (passkeys "discoverable"). Desde la compu se puede usar la passkey del celu escaneando el QR del navegador.
+- **Otro dispositivo:** "Sumar otro dispositivo" genera un link de un uso (30 min). Si alguien pierde el celu, un admin le genera un **link de recuperación**.
+- Si el link de invitación se filtra, el admin genera uno nuevo y el viejo deja de andar.
 
-## Anti-trampa (básico, a propósito)
+## Anti-trampa
 - `votes` tiene PK `(topic_id, member_id)`: un voto vigente por persona por tema, garantizado por la DB.
 - `vote_log` append-only registra cada intento (`new`, `changed`, `duplicate`) con IP.
-- Solo votan miembros cargados por un admin. 5 PIN incorrectos bloquean el nombre por 15 min.
-- PIN hasheado con scrypt, sesión en cookie HttpOnly + SameSite=Lax, chequeo de Origin en POST, HTML escapado.
+- Sesión en cookie HttpOnly + SameSite=Lax, chequeo de Origin en POST, CSP estricta, HTML escapado.
 
 ## Correr
-Node >= 22.13, sin dependencias.
+Node >= 22.13. Única dependencia: `@simplewebauthn/server`.
 ```sh
-npm run cli -- add "Tu Nombre" --admin     # primer admin
-npm run cli -- import miembros.txt         # un nombre por línea (o cargalos desde /admin)
-npm start                                  # http://localhost:3000
-npm test
+npm install
+ORIGIN=https://votapp.tudominio.com npm start   # imprime el link de invitación
+npm test          # unit + HTTP
+npm run e2e       # flujo completo con autenticador virtual de Chromium (requiere playwright)
 ```
-Variables: `PORT` (3000), `DB_PATH` (`votapp.db`), `COOKIE_SECURE=1` si servís por HTTPS (recomendado).
+Variables: `PORT` (3000), `ORIGIN` (URL pública exacta; default `http://localhost:PORT`), `DB_PATH` (`votapp.db`).
 
-CLI: `add "Nombre" [--admin] | import archivo | list | reset "Nombre" | admin "Nombre"`.
+**WebAuthn exige HTTPS** (salvo en `localhost`), y `ORIGIN` tiene que coincidir con la URL que usa la gente. Cambiar de dominio invalida las passkeys.
+
+CLI: `npm run cli -- list | invite [--rotate] | approve "Nombre" | admin "Nombre" | link "Nombre"`.
