@@ -27,8 +27,11 @@ function createAuth(model, { origin, rpName = 'Votapp' }) {
   };
 
   return {
-    /** body: { name, invite } para alta nueva, o { link } para sumar dispositivo a una cuenta. */
-    async registerOptions(body) {
+    /**
+     * body: { name, invite } para alta nueva, o { link } para sumar dispositivo a una cuenta.
+     * Con verificación por WhatsApp (`ctx.wa`), la identidad sale de `ctx.verification`.
+     */
+    async registerOptions(body, ctx = {}) {
       let flow, userName, handle, exclude = [];
       if (body.link) {
         const mem = model.linkMember(body.link);
@@ -36,6 +39,19 @@ function createAuth(model, { origin, rpName = 'Votapp' }) {
         userName = mem.name; handle = mem.handle;
         exclude = model.credentialIds(mem.id);
         flow = { kind: 'reg', link: body.link };
+      } else if (ctx.wa) {
+        const v = ctx.verification;
+        if (!v?.verified_at) throw new UserError('Primero verificá con WhatsApp.');
+        const existing = model.memberByWa(v.wa_lid, v.wa_pn);
+        if (existing) {
+          userName = existing.name; handle = existing.handle;
+          exclude = model.credentialIds(existing.id);
+          flow = { kind: 'reg', addTo: existing.id, browserKey: v.browser_key };
+        } else {
+          userName = model.checkName(body.name || v.wa_name);
+          handle = crypto.randomBytes(16).toString('base64url');
+          flow = { kind: 'reg', name: userName, handle, browserKey: v.browser_key };
+        }
       } else {
         if (body.invite !== model.invite()) throw new UserError('El link de invitación no es válido. Pedí el actual en el grupo.');
         userName = model.checkName(body.name);
@@ -61,7 +77,16 @@ function createAuth(model, { origin, rpName = 'Votapp' }) {
       if (!v.verified) throw new UserError('No se pudo verificar la passkey.');
       const { id, publicKey, counter, transports } = v.registrationInfo.credential;
       const cred = { id, publicKey, counter, transports };
-      return f.link ? model.useLink(f.link, cred) : model.register(f.name, f.handle, cred);
+      if (f.link) return model.useLink(f.link, cred);
+      if (!f.browserKey) return model.register(f.name, f.handle, cred);
+      // Alta o dispositivo nuevo verificado por WhatsApp
+      const ver = model.verification(f.browserKey);
+      if (!ver?.verified_at) throw new UserError('La verificación de WhatsApp venció. Empezá de nuevo.');
+      let memberId = f.addTo;
+      if (memberId) model.addCredential(memberId, cred);
+      else memberId = model.register(f.name, f.handle, cred, ver);
+      model.consumeVerification(f.browserKey);
+      return memberId;
     },
 
     async loginOptions() {

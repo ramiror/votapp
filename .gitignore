@@ -1,4 +1,5 @@
 node_modules/
 auth/
+wa-auth/
 *.db
 *.db-*

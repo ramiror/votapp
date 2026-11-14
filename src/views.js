@@ -14,6 +14,7 @@ input,select,button,textarea{font:inherit;width:100%;padding:10px 12px;border-ra
 button{background:var(--acc);color:var(--acc-fg);border:0;font-weight:600;cursor:pointer}
 button.link{background:none;color:var(--mut);width:auto;padding:0;text-decoration:underline;font-weight:400}
 label{display:block;margin:8px 0 4px;font-size:.9rem}form>*+button,input+button{margin-top:12px}
+a.btn{display:block;text-align:center;padding:10px 12px;border-radius:8px;background:var(--acc);color:var(--acc-fg);font-weight:600;text-decoration:none}
 ul.topics{list-style:none;margin:0;padding:0}ul.topics li+li{border-top:1px solid var(--line)}
 ul.topics a{display:flex;justify-content:space-between;gap:8px;padding:10px 0;color:inherit;text-decoration:none}
 .tag{font-size:.75rem;padding:2px 8px;border-radius:99px;border:1px solid var(--line);white-space:nowrap;align-self:center}
@@ -36,7 +37,7 @@ const flash = (msg) => msg ? `<p class="${msg.ok ? 'ok' : 'err'}">${esc(msg.text
 function login(msg) {
   return layout('Entrar', `<div class="card"><h1>Entrar</h1>${flash(msg)}<p id="msg"></p>
 <button id="login" type="button">🔑 Entrar con passkey</button>
-<p class="mut">Usa la huella, la cara o el PIN de tu dispositivo. ¿Primera vez? Pedí el link de invitación en el grupo.
+<p class="mut">Usa la huella, la cara o el PIN de tu dispositivo. ¿Primera vez, dispositivo nuevo o perdiste el tuyo? Entrá con el link de invitación del grupo.
 Desde la compu podés entrar con la passkey del celu escaneando el QR que te muestra el navegador.</p></div>`);
 }
 
@@ -48,6 +49,35 @@ function register(invite, valid) {
 <button>🔑 Crear passkey</button></form>
 <p class="mut">Tu dispositivo crea una clave privada que nunca sale de él; acá solo guardamos la pública. Un admin aprueba tu registro.</p>
 <p class="mut">¿Ya tenés cuenta? <a href="/">Entrá</a>.</p></div>`);
+}
+
+function registerWa(code, botNumber) {
+  if (!botNumber) return layout('Registrarme', `<div class="card"><h1>Registrarme</h1>
+<p>El bot de WhatsApp no está conectado ahora. Probá en un rato.</p></div>`);
+  const href = `https://wa.me/${botNumber}?text=${encodeURIComponent('Mi código de Votapp: ' + code)}`;
+  return layout('Registrarme', `<div class="card"><h1>Registrarme</h1>
+<p><b>Paso 1:</b> mandale tu código al bot por WhatsApp. Así tomamos tu nombre y número de ahí, sin que tengas que escribir nada.</p>
+<a class="btn" href="${esc(href)}" target="_blank" rel="noopener">📲 Verificar con WhatsApp</a>
+<p class="mut">Se abre WhatsApp con el mensaje listo: solo dale enviar. Si no se abre, mandale <b>${esc(code)}</b> a +${esc(botNumber)}.</p>
+<p id="wait" class="mut">⏳ Esperando tu mensaje… esta página se actualiza sola.</p></div>`);
+}
+
+function registerVerified(v, existing) {
+  const who = [v.wa_name, v.wa_pn && '+' + v.wa_pn.split('@')[0]].filter(Boolean).map(esc).join(' · ');
+  if (existing) {
+    return layout('Sumar dispositivo', `<div class="card"><h1>¡Hola de nuevo, ${esc(existing.name)}!</h1><p id="msg"></p>
+<p class="mut">WhatsApp verificado: ${who}</p>
+<p>Ya tenés cuenta. Creá una passkey para entrar desde este dispositivo.</p>
+<form id="register"><button>🔑 Crear passkey</button></form></div>`);
+  }
+  return layout('Registrarme', `<div class="card"><h1>Registrarme</h1><p id="msg"></p>
+<p class="ok">✅ WhatsApp verificado: ${who || 'ok'}</p>
+${v.in_group ? '' : '<p class="err">No te encontramos en el grupo: un admin va a tener que aprobarte.</p>'}
+<form id="register"><p><b>Paso 2:</b> creá tu passkey.</p>
+<label for="n">Nombre que se va a ver en las votaciones</label>
+<input id="n" name="name" maxlength="40" required value="${esc(v.wa_name || '')}">
+<button>🔑 Crear passkey</button></form>
+<p class="mut">Tu dispositivo crea una clave privada que nunca sale de él; acá solo guardamos la pública.</p></div>`);
 }
 
 function link(mem, token) {
@@ -65,8 +95,8 @@ function linkCreated(me, mem, url) {
 <p><a href="${self ? '/' : '/admin'}">Volver</a></p></div>`, me);
 }
 
-const pending = (me) => layout('Pendiente', `<div class="card"><h1>¡Hola, ${esc(me.name)}!</h1>
-<p>Tu registro está esperando que un admin lo apruebe. Volvé a entrar en un rato.</p>
+const pending = (me, wa) => layout('Pendiente', `<div class="card"><h1>¡Hola, ${esc(me.name)}!</h1>
+<p>${wa ? 'No te encontramos en el grupo de WhatsApp, así que' : 'Tu registro está esperando que'} un admin te tiene que aprobar. Volvé a entrar en un rato.</p>
 <form method="post" action="/logout"><button class="link">Salir</button></form></div>`, me);
 
 function home(me, topics, msg) {
@@ -106,9 +136,13 @@ function admin(me, members, inviteUrl, msg) {
   const btn = (id, action, label, extra = '') => `<form method="post" action="/admin/members/${id}/${action}"${extra}><button>${label}</button></form>`;
   const pend = members.filter((m) => m.status === 'pending');
   const act = members.filter((m) => m.status !== 'pending');
-  const pendRows = pend.map((m) => `<tr><td>${esc(m.name)}</td><td style="text-align:right">${btn(m.id, 'approve', 'Aprobar')}
+  const wa = (m) => {
+    const bits = [m.wa_pn ? '+' + m.wa_pn.split('@')[0] : m.wa_lid ? 'WA (número oculto)' : 'sin WhatsApp', m.wa_name && m.wa_name !== m.name ? `"${m.wa_name}"` : '', m.wa_pn || m.wa_lid ? (m.in_group ? 'en el grupo' : 'fuera del grupo') : ''];
+    return `<br><span class="mut">${bits.filter(Boolean).map(esc).join(' · ')}</span>`;
+  };
+  const pendRows = pend.map((m) => `<tr><td>${esc(m.name)}${wa(m)}</td><td style="text-align:right">${btn(m.id, 'approve', 'Aprobar')}
 ${btn(m.id, 'reject', 'Rechazar', ` data-confirm="¿Rechazar a ${esc(m.name)}?"`)}</td></tr>`).join('');
-  const rows = act.map((m) => `<tr><td>${esc(m.name)}${m.is_admin ? ' <span class="tag">admin</span>' : ''}<br><span class="mut">${m.devices} dispositivo(s)</span></td>
+  const rows = act.map((m) => `<tr><td>${esc(m.name)}${m.is_admin ? ' <span class="tag">admin</span>' : ''}${wa(m)}<br><span class="mut">${m.devices} dispositivo(s)</span></td>
 <td style="text-align:right">${btn(m.id, 'link', 'Link recuperación')}
 ${m.id !== me.id ? `<form method="post" action="/admin/members/${m.id}/admin"><input type="hidden" name="on" value="${m.is_admin ? 0 : 1}"><button>${m.is_admin ? 'Quitar admin' : 'Hacer admin'}</button></form>` : ''}</td></tr>`).join('');
   return layout('Admin', `${flash(msg)}
@@ -121,4 +155,4 @@ ${pend.length ? `<div class="card"><h2>Pendientes de aprobación (${pend.length}
 
 const notFound = (me) => layout('No existe', '<div class="card"><h1>No existe</h1><a href="/">Volver</a></div>', me);
 
-module.exports = { login, register, link, linkCreated, pending, home, topic, admin, notFound };
+module.exports = { login, register, registerWa, registerVerified, link, linkCreated, pending, home, topic, admin, notFound };

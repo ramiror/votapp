@@ -12,6 +12,10 @@ function openDb(path = process.env.DB_PATH || 'votapp.db') {
       handle     TEXT NOT NULL UNIQUE,          -- user.id de WebAuthn (opaco)
       is_admin   INTEGER NOT NULL DEFAULT 0,
       status     TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'active'
+      wa_lid     TEXT UNIQUE,                   -- identidad de WhatsApp (LID y/o número)
+      wa_pn      TEXT UNIQUE,
+      wa_name    TEXT,                          -- nombre de perfil de WhatsApp
+      in_group   INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     -- Passkeys: solo guardamos la clave pública de cada dispositivo.
@@ -29,6 +33,17 @@ function openDb(path = process.env.DB_PATH || 'votapp.db') {
       token      TEXT PRIMARY KEY,
       member_id  INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
       expires_at INTEGER NOT NULL
+    );
+    -- Verificaciones por WhatsApp: el navegador muestra un código, la persona se lo manda al bot.
+    CREATE TABLE IF NOT EXISTS verifications (
+      code        TEXT PRIMARY KEY,
+      browser_key TEXT NOT NULL UNIQUE,         -- ata el código a la cookie del navegador que lo pidió
+      expires_at  INTEGER NOT NULL,
+      wa_lid      TEXT,
+      wa_pn       TEXT,
+      wa_name     TEXT,
+      in_group    INTEGER,
+      verified_at INTEGER
     );
     CREATE TABLE IF NOT EXISTS sessions (
       token      TEXT PRIMARY KEY,

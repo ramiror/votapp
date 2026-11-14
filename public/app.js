@@ -51,11 +51,17 @@ const run = (btn, fn) => async (e) => {
 
 document.addEventListener('DOMContentLoaded', () => {
   const f = document.getElementById('register');
-  if (f) f.addEventListener('submit', run(f.querySelector('button'), () => register({ name: f.name.value, invite: f.invite.value })));
+  if (f) f.addEventListener('submit', run(f.querySelector('button'), () => register({ name: f.elements.namedItem('name')?.value, invite: f.elements.namedItem('invite')?.value })));
   const l = document.getElementById('login');
   if (l) l.addEventListener('click', run(l, login));
   const k = document.getElementById('link');
   if (k) k.addEventListener('click', run(k, () => register({ link: k.dataset.token })));
+  // Esperando que llegue el mensaje de WhatsApp al bot
+  if (document.getElementById('wait')) {
+    setInterval(async () => {
+      try { if ((await (await fetch('/api/verify/status')).json()).verified) location.reload(); } catch { /* reintenta */ }
+    }, 2500);
+  }
   for (const el of document.querySelectorAll('form[data-confirm]')) {
     el.addEventListener('submit', (e) => { if (!confirm(el.dataset.confirm)) e.preventDefault(); });
   }

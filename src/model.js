@@ -5,6 +5,8 @@ const MAX_OPTIONS = 10;
 
 class UserError extends Error {}
 
+// Sin 0/O/1/I para que no haya confusiones al leerlo.
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const rnd = (n) => crypto.randomBytes(n).toString('base64url');
 
 function createModel(db) {
@@ -33,19 +35,57 @@ function createModel(db) {
       if (q('SELECT 1 FROM members WHERE name = ?').get(name)) throw new UserError(`Ya hay alguien registrado como "${name}". Usá otro nombre.`);
       return name;
     },
-    /** Alta de miembro con su primera passkey. El primero del sistema queda admin y activo. */
-    register(name, handle, cred) {
+    /**
+     * Alta de miembro con su primera passkey. El primero del sistema queda admin y activo.
+     * Con `wa` (verificado por WhatsApp), queda activo si está en el grupo.
+     */
+    register(name, handle, cred, wa = null) {
       return tx(() => {
         name = m.checkName(name);
         const first = !q('SELECT 1 FROM members LIMIT 1').get();
-        const id = Number(q('INSERT INTO members (name, handle, is_admin, status) VALUES (?, ?, ?, ?)')
-          .run(name, handle, first ? 1 : 0, first ? 'active' : 'pending').lastInsertRowid);
+        const active = first || !!wa?.in_group;
+        const id = Number(q(`INSERT INTO members (name, handle, is_admin, status, wa_lid, wa_pn, wa_name, in_group)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(name, handle, first ? 1 : 0, active ? 'active' : 'pending',
+          wa?.wa_lid ?? null, wa?.wa_pn ?? null, wa?.wa_name ?? null, wa?.in_group ? 1 : 0).lastInsertRowid);
         m.addCredential(id, cred);
         return id;
       });
     },
+
+    // --- verificación por WhatsApp ---
+    startVerification(ttlMs = 15 * 60_000, now = Date.now()) {
+      q('DELETE FROM verifications WHERE expires_at < ?').run(now);
+      const code = 'VOTAPP-' + Array.from(crypto.randomBytes(6), (b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
+      const browserKey = rnd(24);
+      q('INSERT INTO verifications (code, browser_key, expires_at) VALUES (?, ?, ?)').run(code, browserKey, now + ttlMs);
+      return { code, browserKey };
+    },
+    verification: (browserKey, now = Date.now()) =>
+      q('SELECT * FROM verifications WHERE browser_key = ? AND expires_at >= ?').get(String(browserKey || ''), now),
+    /** Lo llama el bot al recibir el código. Devuelve el miembro existente si esa cuenta de WhatsApp ya está registrada. */
+    completeVerification(code, { lid, pn, name, inGroup }, now = Date.now()) {
+      const v = q('SELECT * FROM verifications WHERE code = ? AND expires_at >= ?').get(String(code).toUpperCase(), now);
+      if (!v) throw new UserError('Ese código no existe o venció. Pedí uno nuevo en la web.');
+      if (!lid && !pn) throw new UserError('No pude identificar tu cuenta de WhatsApp.');
+      q('UPDATE verifications SET wa_lid = ?, wa_pn = ?, wa_name = ?, in_group = ?, verified_at = ? WHERE code = ?')
+        .run(lid || null, pn || null, name || null, inGroup ? 1 : 0, now, v.code);
+      const existing = m.memberByWa(lid, pn);
+      if (existing) m.refreshWa(existing.id, { lid, pn, name, inGroup });
+      return { existing };
+    },
+    memberByWa: (lid, pn) => (lid || pn)
+      ? q('SELECT id, name, handle, is_admin, status FROM members WHERE wa_lid = ? OR wa_pn = ?').get(lid || '-', pn || '-')
+      : undefined,
+    /** Completa LID/número que falten y, si ahora está en el grupo, lo activa. */
+    refreshWa(id, { lid, pn, name, inGroup }) {
+      q(`UPDATE members SET wa_lid = COALESCE(wa_lid, ?), wa_pn = COALESCE(wa_pn, ?), wa_name = COALESCE(?, wa_name),
+         in_group = ?, status = CASE WHEN ? THEN 'active' ELSE status END WHERE id = ?`)
+        .run(lid || null, pn || null, name || null, inGroup ? 1 : 0, inGroup ? 1 : 0, id);
+    },
+    consumeVerification: (browserKey) => q('DELETE FROM verifications WHERE browser_key = ?').run(String(browserKey || '')),
+
     members: () => q(`
-      SELECT m.id, m.name, m.is_admin, m.status, COUNT(c.id) AS devices
+      SELECT m.id, m.name, m.is_admin, m.status, m.wa_pn, m.wa_lid, m.wa_name, m.in_group, COUNT(c.id) AS devices
       FROM members m LEFT JOIN credentials c ON c.member_id = m.id GROUP BY m.id ORDER BY m.status DESC, m.name`).all(),
     member: (id) => q('SELECT id, name, handle, is_admin, status FROM members WHERE id = ?').get(id),
     approve: (id) => q("UPDATE members SET status = 'active' WHERE id = ?").run(id),

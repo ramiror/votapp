@@ -8,6 +8,7 @@ const views = require('./views');
 
 const COOKIE = 'votapp_sid';
 const FLOW = 'votapp_flow';
+const VERIFY = 'votapp_verify';
 const APP_JS = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'));
 
 const MSGS = {
@@ -31,7 +32,8 @@ function readBody(req) {
 const cookies = (req) => Object.fromEntries((req.headers.cookie || '').split(';')
   .map((c) => c.trim().split('=')).filter((p) => p[0]).map(([k, v]) => [k, decodeURIComponent(v || '')]));
 
-function createServer(model, { origin = 'http://localhost:3000' } = {}) {
+/** `wa`: { number(), ready() } del bot de WhatsApp, o null para registro sin verificación. */
+function createServer(model, { origin = 'http://localhost:3000', wa = null } = {}) {
   const auth = createAuth(model, { origin });
   const secure = origin.startsWith('https:') ? '; Secure' : '';
   const cookie = (name, val, maxAge) => `${name}=${val}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`;
@@ -70,21 +72,39 @@ function createServer(model, { origin = 'http://localhost:3000' } = {}) {
       if (p.startsWith('/api/') && isPost) {
         try {
           if (p === '/api/register/options' || p === '/api/login/options') {
-            const { options, flowId } = p === '/api/login/options' ? await auth.loginOptions() : await auth.registerOptions(body);
+            const { options, flowId } = p === '/api/login/options' ? await auth.loginOptions()
+              : await auth.registerOptions(body, { wa: !!wa, verification: wa && model.verification(ck[VERIFY]) });
             return json(options, 200, { 'Set-Cookie': cookie(FLOW, flowId, 300) });
           }
           if (p === '/api/register/verify' || p === '/api/login/verify') {
             const memberId = p === '/api/login/verify' ? await auth.loginVerify(ck[FLOW], body) : await auth.registerVerify(ck[FLOW], body);
-            return json({ ok: true, redirect: '/' }, 200, { 'Set-Cookie': [login(memberId), cookie(FLOW, '', 0)] });
+            return json({ ok: true, redirect: '/' }, 200, { 'Set-Cookie': [login(memberId), cookie(FLOW, '', 0), cookie(VERIFY, '', 0)] });
           }
         } catch (e) { if (e instanceof UserError) return json({ error: e.message }, 400); throw e; }
         return json({ error: 'No existe' }, 404);
       }
 
+      if (p === '/api/verify/status' && !isPost) return json({ verified: !!model.verification(ck[VERIFY])?.verified_at });
+
       // --- páginas públicas ---
       if (p === '/registro' && !isPost) {
         const inv = url.searchParams.get('i') || '';
-        return send(views.register(inv, inv === model.invite()));
+        if (inv !== model.invite()) return send(views.register(inv, false));
+        if (!wa) return send(views.register(inv, true));
+        // Registro verificado por WhatsApp
+        let v = model.verification(ck[VERIFY]);
+        let setCookie;
+        if (!v) {
+          const { browserKey } = model.startVerification();
+          v = model.verification(browserKey);
+          setCookie = cookie(VERIFY, browserKey, 15 * 60);
+        }
+        const html = v.verified_at
+          ? views.registerVerified(v, model.memberByWa(v.wa_lid, v.wa_pn))
+          : views.registerWa(v.code, wa.ready() && wa.number());
+        res.setHeader('Cache-Control', 'no-store');
+        if (setCookie) res.setHeader('Set-Cookie', setCookie);
+        return send(html);
       }
       let mt;
       if ((mt = p.match(/^\/vincular\/([\w-]+)$/)) && !isPost) return send(views.link(model.linkMember(mt[1]), mt[1]));
@@ -95,7 +115,7 @@ function createServer(model, { origin = 'http://localhost:3000' } = {}) {
         model.logout(token);
         return redirect('/', { 'Set-Cookie': cookie(COOKIE, '', 0) });
       }
-      if (me.status !== 'active') return send(views.pending(me));
+      if (me.status !== 'active') return send(views.pending(me, !!wa));
 
       if (p === '/' && !isPost) return send(views.home(me, model.topics(me.id), msgFromQuery()));
       if (p === '/link' && isPost) return send(views.linkCreated(me, me, `${origin}/vincular/${model.createLink(me.id)}`));
@@ -147,7 +167,10 @@ if (require.main === module) {
   const port = Number(process.env.PORT || 3000);
   const origin = process.env.ORIGIN || `http://localhost:${port}`;
   const model = createModel(openDb());
-  createServer(model, { origin }).listen(port, () => {
+  const wa = process.env.WA_ENABLED === '0' ? null : require('./whatsapp').startBot(model, {
+    groupJid: process.env.WA_GROUP, authDir: process.env.WA_AUTH_DIR || 'wa-auth', pairNumber: process.env.WA_PAIR_NUMBER,
+  });
+  createServer(model, { origin, wa }).listen(port, () => {
     console.log(`Votapp en ${origin} (escuchando en :${port})`);
     console.log(`Link de invitación: ${origin}/registro?i=${model.invite()}`);
   });
